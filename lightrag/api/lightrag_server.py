@@ -808,7 +808,7 @@ def create_app(args):
                     kwargs = {
                         "texts": texts,
                         "embedding_dim": embedding_dim,
-                        "base_url": host,
+                        "base_url": host,   
                         "api_key": api_key,
                     }
                     if model:
@@ -1043,21 +1043,20 @@ def create_app(args):
     ollama_server_infos = OllamaServerInfos(
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
+    #Get ontology path from environment variable
+    ontology_path = os.getenv("ONTOLOGY_PATH")
+    if not ontology_path:
+        raise RuntimeError("ONTOLOGY_PATH is not set in environment")
 
-    
-    ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "travel_ontology.json"
-    # ^ pas dit aan op jouw structuur
+    ONTOLOGY_PATH = Path(ontology_path)
+
+    if not ONTOLOGY_PATH.exists():
+        raise FileNotFoundError(f"Ontology file not found: {ONTOLOGY_PATH}")
 
     with ONTOLOGY_PATH.open("r", encoding="utf-8") as f:
         raw_ontology = json.load(f)
 
     compiled_ontology = compile_ontology(raw_ontology)
-
-    logger.info(
-        f"Loaded ontology '{compiled_ontology.get('name')}' "
-        f"v{compiled_ontology.get('version')} "
-        f"with {len(compiled_ontology.get('relation_predicates', []))} relations"
-    )
 
     # Initialize RAG with unified configuration
     try:

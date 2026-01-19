@@ -1086,7 +1086,7 @@ async def _process_extraction_result(
             relationship_data["tgt_id"] = truncated_target
             maybe_edges[(truncated_source, truncated_target)].append(relationship_data)
 
-    # --- NEW: drop edges whose endpoints were not extracted as entities in THIS chunk ---
+    # drop edges whose endpoints were not extracted as entities in THIS chunk 
     # This prevents edge-driven UNKNOWN node creation later.
     seen_entities = set(maybe_nodes.keys())
 
@@ -2350,7 +2350,6 @@ async def _merge_edges_then_upsert(
                 "entity_type": "UNKNOWN",
                 "file_path": file_path,
                 "created_at": node_created_at,
-                "truncate": "",
             }
             await knowledge_graph_inst.upsert_node(need_insert_id, node_data=node_data)
 
@@ -2406,7 +2405,6 @@ async def _merge_edges_then_upsert(
         source_id=source_id,
         file_path=file_path,
         created_at=edge_created_at,
-        truncate="",
         predicate=predicate_resolved,
         predicate_reason=predicate_reason,
         original_src_id=original_src_id,
@@ -2423,7 +2421,6 @@ async def _merge_edges_then_upsert(
         source_id=source_id,
         file_path=file_path,
         created_at=edge_created_at,
-        truncate="",
         weight=weight,
         predicate=predicate_resolved,
         predicate_reason=predicate_reason,
@@ -2460,7 +2457,6 @@ async def _merge_edges_then_upsert(
                 "file_path": file_path,
                 "original_src_id": original_src_id,
                 "original_tgt_id": original_tgt_id,
-                "edge_key_swapped_for_storage": swapped_for_storage,
             }
         }
         await safe_vdb_operation_with_exception(
