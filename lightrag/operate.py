@@ -72,7 +72,33 @@ from dotenv import load_dotenv
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+from pathlib import Path as _Path
+
+# Flexible .env loader: try CWD, package dir, package parent, then fallback
+def _flexible_load_dotenv_operate():
+    candidates = [
+        _Path.cwd() / ".env",
+        _Path(__file__).resolve().parent / ".env",
+        _Path(__file__).resolve().parents[1] / ".env",
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                load_dotenv(dotenv_path=str(c), override=False)
+                try:
+                    logger.info(f"Loaded .env from {c}")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            continue
+    try:
+        load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+    except Exception:
+        pass
+
+
+_flexible_load_dotenv_operate()
 
 
 def _truncate_entity_identifier(
@@ -454,34 +480,59 @@ async def _handle_single_relationship_extraction(
     timestamp: int,
     file_path: str = "unknown_source",
 ):
-    if (
-        len(record_attributes) != 5 or "relation" not in record_attributes[0]
-    ):  # treat "relationship" and "relation" interchangeable
-        if len(record_attributes) > 1 and "relation" in record_attributes[0]:
-            logger.warning(
-                f"{chunk_key}: LLM output format error; found {len(record_attributes)}/5 fields on REALTION `{record_attributes[1]}`~`{record_attributes[2] if len(record_attributes) > 2 else 'N/A'}`"
-            )
-            logger.debug(record_attributes)
+    # Function for parsing relationships. 
+    # Support both old format (no explicit predicate) and new format with predicate
+    # New format expected fields (6+): relation | predicate | source | target | keywords | description [| weight]
+    # Old format expected fields (5): relation | source | target | keywords | description [| weight]
+    if "relation" not in record_attributes[0]:
+        return None
+    if len(record_attributes) < 5:
+        logger.warning(
+            f"{chunk_key}: LLM output format error; insufficient fields for RELATION: {len(record_attributes)}"
+        )
+        logger.debug(record_attributes)
         return None
 
     try:
+        # Parse flexible formats
+        predicate = None
+        weight_field = None
+
+        if len(record_attributes) >= 6:
+            # New format with predicate
+            predicate = sanitize_and_normalize_extracted_text(
+                record_attributes[1], remove_inner_quotes=True
+            )
+            source_idx = 2
+            target_idx = 3
+            keywords_idx = 4
+            desc_idx = 5
+            weight_idx = 6
+        else:
+            # Old format without predicate
+            source_idx = 1
+            target_idx = 2
+            keywords_idx = 3
+            desc_idx = 4
+            weight_idx = 5
+
         source = sanitize_and_normalize_extracted_text(
-            record_attributes[1], remove_inner_quotes=True
+            record_attributes[source_idx], remove_inner_quotes=True
         )
         target = sanitize_and_normalize_extracted_text(
-            record_attributes[2], remove_inner_quotes=True
+            record_attributes[target_idx], remove_inner_quotes=True
         )
 
         # Validate entity names after all cleaning steps
         if not source:
             logger.info(
-                f"Empty source entity found after sanitization. Original: '{record_attributes[1]}'"
+                f"Empty source entity found after sanitization. Original: '{record_attributes[source_idx]}'"
             )
             return None
 
         if not target:
             logger.info(
-                f"Empty target entity found after sanitization. Original: '{record_attributes[2]}'"
+                f"Empty target entity found after sanitization. Original: '{record_attributes[target_idx]}'"
             )
             return None
 
@@ -493,27 +544,33 @@ async def _handle_single_relationship_extraction(
 
         # Process keywords with same cleaning pipeline
         edge_keywords = sanitize_and_normalize_extracted_text(
-            record_attributes[3], remove_inner_quotes=True
+            record_attributes[keywords_idx], remove_inner_quotes=True
         )
         edge_keywords = edge_keywords.replace("，", ",")
 
         # Process relationship description with same cleaning pipeline
-        edge_description = sanitize_and_normalize_extracted_text(record_attributes[4])
-
-        edge_source_id = chunk_key
-        weight = (
-            float(record_attributes[-1].strip('"').strip("'"))
-            if is_float_regex(record_attributes[-1].strip('"').strip("'"))
-            else 1.0
+        edge_description = sanitize_and_normalize_extracted_text(
+            record_attributes[desc_idx]
         )
+
+        # Weight parsing if provided and numeric
+        weight = 1.0
+        if len(record_attributes) > weight_idx:
+            maybe_weight = record_attributes[weight_idx].strip('"').strip("'")
+            if is_float_regex(maybe_weight):
+                try:
+                    weight = float(maybe_weight)
+                except Exception:
+                    weight = 1.0
 
         return dict(
             src_id=source,
             tgt_id=target,
+            predicate=predicate,
             weight=weight,
             description=edge_description,
             keywords=edge_keywords,
-            source_id=edge_source_id,
+            source_id=chunk_key,
             file_path=file_path,
             timestamp=timestamp,
         )
@@ -1028,6 +1085,23 @@ async def _process_extraction_result(
             relationship_data["src_id"] = truncated_source
             relationship_data["tgt_id"] = truncated_target
             maybe_edges[(truncated_source, truncated_target)].append(relationship_data)
+
+    # --- NEW: drop edges whose endpoints were not extracted as entities in THIS chunk ---
+    # This prevents edge-driven UNKNOWN node creation later.
+    seen_entities = set(maybe_nodes.keys())
+
+    filtered_edges = {}
+    dropped = 0
+    for (s, t), rels in maybe_edges.items():
+        if s in seen_entities and t in seen_entities:
+            filtered_edges[(s, t)] = rels
+        else:
+            dropped += 1
+
+    if dropped > 0:
+        logger.info(f"{chunk_key}: Dropped {dropped} dangling relations (missing entity endpoints)")
+
+    maybe_edges = filtered_edges
 
     return dict(maybe_nodes), dict(maybe_edges)
 
@@ -1693,9 +1767,36 @@ async def _merge_nodes_then_upsert(
     source_id = GRAPH_FIELD_SEP.join(source_ids)
 
     # 6.2 Finalize entity type by highest count
+    ontology = (global_config.get("addon_params") or {}).get("ontology") or global_config.get("ontology") or {}
+
+    raw_node_types = []
+    if isinstance(ontology, dict):
+        # compiled ontology
+        raw_node_types = ontology.get("node_types") or []
+        # raw ontology fallback
+        if not raw_node_types and isinstance(ontology.get("ontology"), dict):
+            raw_node_types = ontology["ontology"].get("nodeTypes") or []
+
+    canonical_map = {}
+    for t in raw_node_types if isinstance(raw_node_types, list) else []:
+        if t is None:
+            continue
+        ts = str(t).strip()
+        if ts:
+            canonical_map[ts.lower()] = ts
+
+    def canon_type(t: str | None) -> str:
+        if not t:
+            return "Other"
+        ts = str(t).strip()
+        if not ts:
+            return "Other"
+        return canonical_map.get(ts.lower(), ts)
+
     entity_type = sorted(
         Counter(
-            [dp["entity_type"] for dp in nodes_data] + already_entity_types
+            [canon_type(dp.get("entity_type")) for dp in nodes_data]
+            + [canon_type(t) for t in already_entity_types]
         ).items(),
         key=lambda x: x[1],
         reverse=True,
@@ -1879,13 +1980,186 @@ async def _merge_edges_then_upsert(
     pipeline_status: dict = None,
     pipeline_status_lock=None,
     llm_response_cache: BaseKVStorage | None = None,
-    added_entities: list = None,  # New parameter to track entities added during edge processing
+    added_entities: list = None,
     relation_chunks_storage: BaseKVStorage | None = None,
     entity_chunks_storage: BaseKVStorage | None = None,
 ):
+    # ---------------------------------------------------------------------
+    # 0) Basic guards
+    # ---------------------------------------------------------------------
+    if not src_id or not tgt_id:
+        return None
     if src_id == tgt_id:
         return None
 
+    original_src_id = src_id
+    original_tgt_id = tgt_id
+
+    # ---------------------------------------------------------------------
+    # 1) Normalize predicate tokens in edges_data
+    # ---------------------------------------------------------------------
+    def _norm_pred(p: str | None) -> str | None:
+        if not p:
+            return None
+        p2 = str(p).strip().upper()
+        return p2 if p2 else None
+
+    for dp in edges_data:
+        if "predicate" in dp:
+            dp["predicate"] = _norm_pred(dp.get("predicate"))
+
+    # ---------------------------------------------------------------------
+    # 2) Choose predicate consistently (from edges_data candidates)
+    # ---------------------------------------------------------------------
+    predicate = None
+    candidate_preds = [dp.get("predicate") for dp in edges_data if dp.get("predicate")]
+    if candidate_preds:
+        from collections import Counter
+        cnt = Counter([p for p in candidate_preds if p])
+        if cnt:
+            predicate = cnt.most_common(1)[0][0]
+
+    # ---------------------------------------------------------------------
+    # 3) Ontology validation on ORIGINAL direction
+    #    Only persist relations that are allowed (or downgraded to allowed fallback)
+    # ---------------------------------------------------------------------
+    ontology = (global_config.get("addon_params") or {}).get("ontology") or global_config.get("ontology")
+    enforcement = (global_config.get("ontology_enforcement") or "fallback_related").lower()
+    fallback_predicate = (global_config.get("ontology_fallback_predicate") or "RELATED_TO").strip().upper()
+
+    predicate_reason = ""
+    predicate_resolved = predicate
+
+    async def _get_type(entity_id: str) -> str | None:
+        node = await knowledge_graph_inst.get_node(entity_id)
+        return (node or {}).get("entity_type")
+
+    def _rule_allows(
+        allowed_relations: dict | None,
+        rel_preds: list | None,
+        pred: str,
+        st: str | None,
+        tt: str | None,
+    ) -> tuple[bool, str]:
+        """
+        Returns (allowed, reason).
+        Soft-pass when types are missing/UNKNOWN (common early in pipeline).
+        """
+        if not pred:
+            return False, "empty_predicate"
+
+        # If we have typed rules, validate type pairs
+        if allowed_relations and isinstance(allowed_relations, dict):
+            rule = allowed_relations.get(pred)
+            if rule and isinstance(rule, dict):
+                allowed_src = rule.get("src_types") or rule.get("source_types") or rule.get("src") or []
+                allowed_tgt = rule.get("tgt_types") or rule.get("target_types") or rule.get("tgt") or []
+
+                # Soft-pass if types unknown
+                if not st or not tt or st == "UNKNOWN" or tt == "UNKNOWN":
+                    return True, "types_unknown_soft_pass"
+
+                st_n = (st or "").strip().lower()
+                tt_n = (tt or "").strip().lower()
+
+                allowed_src_n = {str(x).strip().lower() for x in allowed_src}
+                allowed_tgt_n = {str(x).strip().lower() for x in allowed_tgt}
+
+                ok = (st_n in allowed_src_n) and (tt_n in allowed_tgt_n)
+                return (ok, f"type_check_{st_n}->{tt_n}" if ok else f"not_allowed_{st_n}->{tt_n}")
+
+        # Fallback: predicate exists in list
+        if rel_preds and pred in rel_preds:
+            return True, "predicate_in_relation_predicates"
+
+        return False, "predicate_not_in_ontology"
+
+    # Decide whether to keep / invert / fallback / drop
+    try:
+        if predicate is None:
+            predicate_reason = "no_predicate_extracted"
+            predicate_resolved = None
+        elif not ontology:
+            # No ontology loaded: treat as allowed, but still record reason
+            predicate_reason = "no_ontology_loaded_accept"
+            predicate_resolved = predicate
+        else:
+            allowed_relations = ontology.get("allowed_relations") or {}
+            rel_preds = ontology.get("relation_predicates") or []
+            inverse_of = ontology.get("inverse_of") or {}
+
+            # types in ORIGINAL direction
+            src_type_o = await _get_type(original_src_id)
+            tgt_type_o = await _get_type(original_tgt_id)
+
+            ok, why = _rule_allows(allowed_relations, rel_preds, predicate, src_type_o, tgt_type_o)
+            if ok:
+                predicate_resolved = predicate
+                predicate_reason = why
+            else:
+                inv = inverse_of.get(predicate)
+                if inv:
+                    ok2, why2 = _rule_allows(allowed_relations, rel_preds, inv, tgt_type_o, src_type_o)
+                    if ok2:
+                        predicate_resolved = inv
+                        predicate_reason = f"inverse_used:{why2}"
+                    else:
+                        predicate_resolved = None
+                        predicate_reason = f"{why}; inverse_failed:{why2}"
+                else:
+                    predicate_resolved = None
+                    predicate_reason = why
+
+            # Enforcement: only store allowed predicates (or allowed fallback)
+            if predicate_resolved is None:
+                if enforcement == "fallback_related":
+                    # Only fallback if fallback itself exists in ontology
+                    if (allowed_relations and fallback_predicate in allowed_relations) or (
+                        rel_preds and fallback_predicate in rel_preds
+                    ):
+                        predicate_reason = f"{predicate_reason}; enforced_fallback:{fallback_predicate} (from:{predicate})"
+                        predicate_resolved = fallback_predicate
+                    else:
+                        predicate_reason = f"{predicate_reason}; fallback_missing_in_ontology:{fallback_predicate}"
+                        predicate_resolved = None
+                elif enforcement == "drop":
+                    predicate_reason = f"{predicate_reason}; enforced_drop"
+                    predicate_resolved = None
+                else:
+                    # "none" (or unknown): accept as-is (NOT recommended if you want strict allowed-only)
+                    predicate_reason = f"{predicate_reason}; enforcement_none_accept"
+                    predicate_resolved = predicate
+
+    except Exception as e:
+        predicate_resolved = None
+        predicate_reason = f"predicate_validation_error: {e}"
+
+    # If we still don't have a valid/allowed predicate, DROP the edge
+    if predicate_resolved is None:
+        msg = (
+            f"Dropping edge `{original_src_id}`->`{original_tgt_id}` "
+            f"(predicate={predicate}) due to ontology: {predicate_reason}"
+        )
+        logger.warning(msg)
+        if pipeline_status is not None and pipeline_status_lock is not None:
+            async with pipeline_status_lock:
+                pipeline_status["latest_message"] = msg
+                pipeline_status["history_messages"].append(msg)
+        return None
+
+    # ---------------------------------------------------------------------
+    # 4) Canonicalize ONLY FOR STORAGE (after validation)
+    # ---------------------------------------------------------------------
+    src_id_store = original_src_id
+    tgt_id_store = original_tgt_id
+    swapped_for_storage = False
+    if src_id_store > tgt_id_store:
+        src_id_store, tgt_id_store = tgt_id_store, src_id_store
+        swapped_for_storage = True
+
+    # ---------------------------------------------------------------------
+    # 5) Load existing edge data (using storage ids)
+    # ---------------------------------------------------------------------
     already_edge = None
     already_weights = []
     already_source_ids = []
@@ -1893,101 +2167,71 @@ async def _merge_edges_then_upsert(
     already_keywords = []
     already_file_paths = []
 
-    # 1. Get existing edge data from graph storage
-    if await knowledge_graph_inst.has_edge(src_id, tgt_id):
-        already_edge = await knowledge_graph_inst.get_edge(src_id, tgt_id)
-        # Handle the case where get_edge returns None or missing fields
+    if await knowledge_graph_inst.has_edge(src_id_store, tgt_id_store):
+        already_edge = await knowledge_graph_inst.get_edge(src_id_store, tgt_id_store)
         if already_edge:
-            # Get weight with default 1.0 if missing
             already_weights.append(already_edge.get("weight", 1.0))
 
-            # Get source_id with empty string default if missing or None
             if already_edge.get("source_id") is not None:
-                already_source_ids.extend(
-                    already_edge["source_id"].split(GRAPH_FIELD_SEP)
-                )
+                already_source_ids.extend(already_edge["source_id"].split(GRAPH_FIELD_SEP))
 
-            # Get file_path with empty string default if missing or None
             if already_edge.get("file_path") is not None:
-                already_file_paths.extend(
-                    already_edge["file_path"].split(GRAPH_FIELD_SEP)
-                )
+                already_file_paths.extend(already_edge["file_path"].split(GRAPH_FIELD_SEP))
 
-            # Get description with empty string default if missing or None
             if already_edge.get("description") is not None:
-                already_description.extend(
-                    already_edge["description"].split(GRAPH_FIELD_SEP)
-                )
+                already_description.extend(already_edge["description"].split(GRAPH_FIELD_SEP))
 
-            # Get keywords with empty string default if missing or None
             if already_edge.get("keywords") is not None:
                 already_keywords.extend(
-                    split_string_by_multi_markers(
-                        already_edge["keywords"], [GRAPH_FIELD_SEP]
-                    )
+                    split_string_by_multi_markers(already_edge["keywords"], [GRAPH_FIELD_SEP])
                 )
 
     new_source_ids = [dp["source_id"] for dp in edges_data if dp.get("source_id")]
 
-    storage_key = make_relation_chunk_key(src_id, tgt_id)
+    storage_key = make_relation_chunk_key(src_id_store, tgt_id_store)
     existing_full_source_ids = []
     if relation_chunks_storage is not None:
         stored_chunks = await relation_chunks_storage.get_by_id(storage_key)
         if stored_chunks and isinstance(stored_chunks, dict):
-            existing_full_source_ids = [
-                chunk_id for chunk_id in stored_chunks.get("chunk_ids", []) if chunk_id
-            ]
+            existing_full_source_ids = [cid for cid in stored_chunks.get("chunk_ids", []) if cid]
 
     if not existing_full_source_ids:
-        existing_full_source_ids = [
-            chunk_id for chunk_id in already_source_ids if chunk_id
-        ]
+        existing_full_source_ids = [cid for cid in already_source_ids if cid]
 
-    # 2. Merge new source ids with existing ones
+    # ---------------------------------------------------------------------
+    # 6) Merge source ids
+    # ---------------------------------------------------------------------
     full_source_ids = merge_source_ids(existing_full_source_ids, new_source_ids)
 
     if relation_chunks_storage is not None and full_source_ids:
         await relation_chunks_storage.upsert(
-            {
-                storage_key: {
-                    "chunk_ids": full_source_ids,
-                    "count": len(full_source_ids),
-                }
-            }
+            {storage_key: {"chunk_ids": full_source_ids, "count": len(full_source_ids)}}
         )
 
-    # 3. Finalize source_id by applying source ids limit
-    limit_method = global_config.get("source_ids_limit_method")
+    # ---------------------------------------------------------------------
+    # 7) Apply source id limits
+    # ---------------------------------------------------------------------
+    limit_method = global_config.get("source_ids_limit_method") or SOURCE_IDS_LIMIT_METHOD_KEEP
     max_source_limit = global_config.get("max_source_ids_per_relation")
     source_ids = apply_source_ids_limit(
         full_source_ids,
         max_source_limit,
         limit_method,
-        identifier=f"`{src_id}`~`{tgt_id}`",
-    )
-    limit_method = (
-        global_config.get("source_ids_limit_method") or SOURCE_IDS_LIMIT_METHOD_KEEP
+        identifier=f"`{src_id_store}`~`{tgt_id_store}`",
     )
 
-    # 4. Only keep edges with source_id in the final source_ids list if in KEEP mode
     if limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP:
         allowed_source_ids = set(source_ids)
         filtered_edges = []
         for dp in edges_data:
-            source_id = dp.get("source_id")
-            # Skip relationship fragments sourced from chunks dropped by keep oldest cap
-            if (
-                source_id
-                and source_id not in allowed_source_ids
-                and source_id not in existing_full_source_ids
-            ):
+            sid = dp.get("source_id")
+            if sid and sid not in allowed_source_ids and sid not in existing_full_source_ids:
                 continue
             filtered_edges.append(dp)
         edges_data = filtered_edges
-    else:  # In FIFO mode, keep all edges - truncation happens at source_ids level only
+    else:
         edges_data = list(edges_data)
 
-    # 5. Check if we need to skip summary due to source_ids limit
     if (
         limit_method == SOURCE_IDS_LIMIT_METHOD_KEEP
         and len(existing_full_source_ids) >= max_source_limit
@@ -1995,182 +2239,109 @@ async def _merge_edges_then_upsert(
     ):
         if already_edge:
             logger.info(
-                f"Skipped `{src_id}`~`{tgt_id}`: KEEP old chunks  {already_source_ids}/{len(full_source_ids)}"
+                f"Skipped `{src_id_store}`~`{tgt_id_store}`: KEEP old chunks {already_source_ids}/{len(full_source_ids)}"
             )
-            existing_edge_data = dict(already_edge)
-            return existing_edge_data
-        else:
-            logger.error(
-                f"Internal Error: already_node missing for `{src_id}`~`{tgt_id}`"
-            )
-            raise ValueError(
-                f"Internal Error: already_node missing for `{src_id}`~`{tgt_id}`"
-            )
+            return dict(already_edge)
+        raise ValueError(f"Internal Error: already_edge missing for `{src_id_store}`~`{tgt_id_store}`")
 
-    # 6.1 Finalize source_id
+    # ---------------------------------------------------------------------
+    # 8) Finalize source_id + weight + keywords
+    # ---------------------------------------------------------------------
     source_id = GRAPH_FIELD_SEP.join(source_ids)
+    weight = sum([dp.get("weight", 0.0) for dp in edges_data] + already_weights)
 
-    # 6.2 Finalize weight by summing new edges and existing weights
-    weight = sum([dp["weight"] for dp in edges_data] + already_weights)
-
-    # 6.2 Finalize keywords by merging existing and new keywords
     all_keywords = set()
-    # Process already_keywords (which are comma-separated)
     for keyword_str in already_keywords:
-        if keyword_str:  # Skip empty strings
+        if keyword_str:
             all_keywords.update(k.strip() for k in keyword_str.split(",") if k.strip())
-    # Process new keywords from edges_data
     for edge in edges_data:
         if edge.get("keywords"):
-            all_keywords.update(
-                k.strip() for k in edge["keywords"].split(",") if k.strip()
-            )
-    # Join all unique keywords with commas
+            all_keywords.update(k.strip() for k in edge["keywords"].split(",") if k.strip())
     keywords = ",".join(sorted(all_keywords))
 
-    # 7. Deduplicate by description, keeping first occurrence in the same document
+    # ---------------------------------------------------------------------
+    # 9) Deduplicate descriptions
+    # ---------------------------------------------------------------------
     unique_edges = {}
     for dp in edges_data:
-        description_value = dp.get("description")
-        if not description_value:
+        dv = dp.get("description")
+        if not dv:
             continue
-        if description_value not in unique_edges:
-            unique_edges[description_value] = dp
+        if dv not in unique_edges:
+            unique_edges[dv] = dp
 
-    # Sort description by timestamp, then by description length (largest to smallest) when timestamps are the same
     sorted_edges = sorted(
         unique_edges.values(),
         key=lambda x: (x.get("timestamp", 0), -len(x.get("description", ""))),
     )
     sorted_descriptions = [dp["description"] for dp in sorted_edges]
 
-    # Combine already_description with sorted new descriptions
     description_list = already_description + sorted_descriptions
     if not description_list:
-        logger.error(f"Relation {src_id}~{tgt_id} has no description")
-        raise ValueError(f"Relation {src_id}~{tgt_id} has no description")
+        raise ValueError(f"Relation {src_id_store}~{tgt_id_store} has no description")
 
-    # Check for cancellation before LLM summary
     if pipeline_status is not None and pipeline_status_lock is not None:
         async with pipeline_status_lock:
             if pipeline_status.get("cancellation_requested", False):
-                raise PipelineCancelledException(
-                    "User cancelled during relation summary"
-                )
+                raise PipelineCancelledException("User cancelled during relation summary")
 
-    # 8. Get summary description an LLM usage status
+    # ---------------------------------------------------------------------
+    # 10) Summary
+    # ---------------------------------------------------------------------
     description, llm_was_used = await _handle_entity_relation_summary(
         "Relation",
-        f"({src_id}, {tgt_id})",
+        f"({src_id_store}, {tgt_id_store})",
         description_list,
         GRAPH_FIELD_SEP,
         global_config,
         llm_response_cache,
     )
 
-    # 9. Build file_path within MAX_FILE_PATHS limit
+    # ---------------------------------------------------------------------
+    # 11) Build file_path list
+    # ---------------------------------------------------------------------
     file_paths_list = []
     seen_paths = set()
-    has_placeholder = False  # Track if already_file_paths contains placeholder
+    has_placeholder = False
 
     max_file_paths = global_config.get("max_file_paths", DEFAULT_MAX_FILE_PATHS)
-    file_path_placeholder = global_config.get(
-        "file_path_more_placeholder", DEFAULT_FILE_PATH_MORE_PLACEHOLDER
-    )
+    file_path_placeholder = global_config.get("file_path_more_placeholder", DEFAULT_FILE_PATH_MORE_PLACEHOLDER)
 
-    # Collect from already_file_paths, excluding placeholder
     for fp in already_file_paths:
-        # Check if this is a placeholder record
-        if fp and fp.startswith(f"...{file_path_placeholder}"):  # Skip placeholders
+        if fp and fp.startswith(f"...{file_path_placeholder}"):
             has_placeholder = True
             continue
         if fp and fp not in seen_paths:
             file_paths_list.append(fp)
             seen_paths.add(fp)
 
-    # Collect from new data
     for dp in edges_data:
-        file_path_item = dp.get("file_path")
-        if file_path_item and file_path_item not in seen_paths:
-            file_paths_list.append(file_path_item)
-            seen_paths.add(file_path_item)
-
-    # Apply count limit
-    max_file_paths = global_config.get("max_file_paths")
+        fp = dp.get("file_path")
+        if fp and fp not in seen_paths:
+            file_paths_list.append(fp)
+            seen_paths.add(fp)
 
     if len(file_paths_list) > max_file_paths:
-        limit_method = global_config.get(
-            "source_ids_limit_method", SOURCE_IDS_LIMIT_METHOD_KEEP
-        )
-        file_path_placeholder = global_config.get(
-            "file_path_more_placeholder", DEFAULT_FILE_PATH_MORE_PLACEHOLDER
-        )
-
-        # Add + sign to indicate actual file count is higher
-        original_count_str = (
-            f"{len(file_paths_list)}+" if has_placeholder else str(len(file_paths_list))
-        )
-
+        original_count_str = f"{len(file_paths_list)}+" if has_placeholder else str(len(file_paths_list))
         if limit_method == SOURCE_IDS_LIMIT_METHOD_FIFO:
-            # FIFO: keep tail (newest), discard head
             file_paths_list = file_paths_list[-max_file_paths:]
             file_paths_list.append(f"...{file_path_placeholder}...(FIFO)")
         else:
-            # KEEP: keep head (earliest), discard tail
             file_paths_list = file_paths_list[:max_file_paths]
             file_paths_list.append(f"...{file_path_placeholder}...(KEEP Old)")
-
         logger.info(
-            f"Limited `{src_id}`~`{tgt_id}`: file_path {original_count_str} -> {max_file_paths} ({limit_method})"
+            f"Limited `{src_id_store}`~`{tgt_id_store}`: file_path {original_count_str} -> {max_file_paths} ({limit_method})"
         )
-    # Finalize file_path
+
     file_path = GRAPH_FIELD_SEP.join(file_paths_list)
 
-    # 10. Log based on actual LLM usage
-    num_fragment = len(description_list)
-    already_fragment = len(already_description)
-    if llm_was_used:
-        status_message = f"LLMmrg: `{src_id}`~`{tgt_id}` | {already_fragment}+{num_fragment - already_fragment}"
-    else:
-        status_message = f"Merged: `{src_id}`~`{tgt_id}` | {already_fragment}+{num_fragment - already_fragment}"
-
-    truncation_info = truncation_info_log = ""
-    if len(source_ids) < len(full_source_ids):
-        # Add truncation info from apply_source_ids_limit if truncation occurred
-        truncation_info_log = f"{limit_method} {len(source_ids)}/{len(full_source_ids)}"
-        if limit_method == SOURCE_IDS_LIMIT_METHOD_FIFO:
-            truncation_info = truncation_info_log
-        else:
-            truncation_info = "KEEP Old"
-
-    deduplicated_num = already_fragment + len(edges_data) - num_fragment
-    dd_message = ""
-    if deduplicated_num > 0:
-        # Duplicated description detected across multiple trucks for the same entity
-        dd_message = f"dd {deduplicated_num}"
-
-    if dd_message or truncation_info_log:
-        status_message += (
-            f" ({', '.join(filter(None, [truncation_info_log, dd_message]))})"
-        )
-
-    # Add message to pipeline satus when merge happens
-    if already_fragment > 0 or llm_was_used:
-        logger.info(status_message)
-        if pipeline_status is not None and pipeline_status_lock is not None:
-            async with pipeline_status_lock:
-                pipeline_status["latest_message"] = status_message
-                pipeline_status["history_messages"].append(status_message)
-    else:
-        logger.debug(status_message)
-
-    # 11. Update both graph and vector db
-    for need_insert_id in [src_id, tgt_id]:
-        # Optimization: Use get_node instead of has_node + get_node
+    # ---------------------------------------------------------------------
+    # 12) Ensure ORIGINAL nodes exist / update chunk pointers
+    # ---------------------------------------------------------------------
+    for need_insert_id in [original_src_id, original_tgt_id]:
         existing_node = await knowledge_graph_inst.get_node(need_insert_id)
 
         if existing_node is None:
-            # Node doesn't exist - create new node
             node_created_at = int(time.time())
             node_data = {
                 "entity_id": need_insert_id,
@@ -2183,17 +2354,11 @@ async def _merge_edges_then_upsert(
             }
             await knowledge_graph_inst.upsert_node(need_insert_id, node_data=node_data)
 
-            # Update entity_chunks_storage for the newly created entity
             if entity_chunks_storage is not None:
-                chunk_ids = [chunk_id for chunk_id in full_source_ids if chunk_id]
+                chunk_ids = [cid for cid in full_source_ids if cid]
                 if chunk_ids:
                     await entity_chunks_storage.upsert(
-                        {
-                            need_insert_id: {
-                                "chunk_ids": chunk_ids,
-                                "count": len(chunk_ids),
-                            }
-                        }
+                        {need_insert_id: {"chunk_ids": chunk_ids, "count": len(chunk_ids)}}
                     )
 
             if entity_vdb is not None:
@@ -2216,183 +2381,99 @@ async def _merge_edges_then_upsert(
                     retry_delay=0.1,
                 )
 
-            # Track entities added during edge processing
             if added_entities is not None:
-                entity_data = {
-                    "entity_name": need_insert_id,
-                    "entity_type": "UNKNOWN",
-                    "description": description,
-                    "source_id": source_id,
-                    "file_path": file_path,
-                    "created_at": node_created_at,
-                }
-                added_entities.append(entity_data)
-        else:
-            # Node exists - update its source_ids by merging with new source_ids
-            updated = False  # Track if any update occurred
-
-            # 1. Get existing full source_ids from entity_chunks_storage
-            existing_full_source_ids = []
-            if entity_chunks_storage is not None:
-                stored_chunks = await entity_chunks_storage.get_by_id(need_insert_id)
-                if stored_chunks and isinstance(stored_chunks, dict):
-                    existing_full_source_ids = [
-                        chunk_id
-                        for chunk_id in stored_chunks.get("chunk_ids", [])
-                        if chunk_id
-                    ]
-
-            # If not in entity_chunks_storage, get from graph database
-            if not existing_full_source_ids:
-                if existing_node.get("source_id"):
-                    existing_full_source_ids = existing_node["source_id"].split(
-                        GRAPH_FIELD_SEP
-                    )
-
-            # 2. Merge with new source_ids from this relationship
-            new_source_ids_from_relation = [
-                chunk_id for chunk_id in source_ids if chunk_id
-            ]
-            merged_full_source_ids = merge_source_ids(
-                existing_full_source_ids, new_source_ids_from_relation
-            )
-
-            # 3. Save merged full list to entity_chunks_storage (conditional)
-            if (
-                entity_chunks_storage is not None
-                and merged_full_source_ids != existing_full_source_ids
-            ):
-                updated = True
-                await entity_chunks_storage.upsert(
+                added_entities.append(
                     {
-                        need_insert_id: {
-                            "chunk_ids": merged_full_source_ids,
-                            "count": len(merged_full_source_ids),
-                        }
+                        "entity_name": need_insert_id,
+                        "entity_type": "UNKNOWN",
+                        "description": description,
+                        "source_id": source_id,
+                        "file_path": file_path,
+                        "created_at": node_created_at,
                     }
                 )
 
-            # 4. Apply source_ids limit for graph and vector db
-            limit_method = global_config.get(
-                "source_ids_limit_method", SOURCE_IDS_LIMIT_METHOD_KEEP
-            )
-            max_source_limit = global_config.get("max_source_ids_per_entity")
-            limited_source_ids = apply_source_ids_limit(
-                merged_full_source_ids,
-                max_source_limit,
-                limit_method,
-                identifier=f"`{need_insert_id}`",
-            )
-
-            # 5. Update graph database and vector database with limited source_ids (conditional)
-            limited_source_id_str = GRAPH_FIELD_SEP.join(limited_source_ids)
-
-            if limited_source_id_str != existing_node.get("source_id", ""):
-                updated = True
-                updated_node_data = {
-                    **existing_node,
-                    "source_id": limited_source_id_str,
-                }
-                await knowledge_graph_inst.upsert_node(
-                    need_insert_id, node_data=updated_node_data
-                )
-
-                # Update vector database
-                if entity_vdb is not None:
-                    entity_vdb_id = compute_mdhash_id(need_insert_id, prefix="ent-")
-                    entity_content = (
-                        f"{need_insert_id}\n{existing_node.get('description', '')}"
-                    )
-                    vdb_data = {
-                        entity_vdb_id: {
-                            "content": entity_content,
-                            "entity_name": need_insert_id,
-                            "source_id": limited_source_id_str,
-                            "entity_type": existing_node.get("entity_type", "UNKNOWN"),
-                            "file_path": existing_node.get(
-                                "file_path", "unknown_source"
-                            ),
-                        }
-                    }
-                    await safe_vdb_operation_with_exception(
-                        operation=lambda payload=vdb_data: entity_vdb.upsert(payload),
-                        operation_name="existing_entity_update",
-                        entity_name=need_insert_id,
-                        max_retries=3,
-                        retry_delay=0.1,
-                    )
-
-            # 6. Log once at the end if any update occurred
-            if updated:
-                status_message = f"Chunks appended from relation: `{need_insert_id}`"
-                logger.info(status_message)
-                if pipeline_status is not None and pipeline_status_lock is not None:
-                    async with pipeline_status_lock:
-                        pipeline_status["latest_message"] = status_message
-                        pipeline_status["history_messages"].append(status_message)
-
+    # ---------------------------------------------------------------------
+    # 13) Upsert edge into graph storage (USING STORAGE IDS)
+    #     IMPORTANT: we store ONLY predicate + predicate_reason (no predicate_valid/original/candidates)
+    # ---------------------------------------------------------------------
     edge_created_at = int(time.time())
-    await knowledge_graph_inst.upsert_edge(
-        src_id,
-        tgt_id,
-        edge_data=dict(
-            weight=weight,
-            description=description,
-            keywords=keywords,
-            source_id=source_id,
-            file_path=file_path,
-            created_at=edge_created_at,
-            truncate=truncation_info,
-        ),
-    )
 
-    edge_data = dict(
-        src_id=src_id,
-        tgt_id=tgt_id,
+    edge_payload = dict(
+        weight=weight,
         description=description,
         keywords=keywords,
         source_id=source_id,
         file_path=file_path,
         created_at=edge_created_at,
-        truncate=truncation_info,
-        weight=weight,
+        truncate="",
+        predicate=predicate_resolved,
+        predicate_reason=predicate_reason,
+        original_src_id=original_src_id,
+        original_tgt_id=original_tgt_id,
     )
 
-    # Sort src_id and tgt_id to ensure consistent ordering (smaller string first)
-    if src_id > tgt_id:
-        src_id, tgt_id = tgt_id, src_id
+    await knowledge_graph_inst.upsert_edge(src_id_store, tgt_id_store, edge_data=edge_payload)
 
+    edge_data = dict(
+        src_id=src_id_store,
+        tgt_id=tgt_id_store,
+        description=description,
+        keywords=keywords,
+        source_id=source_id,
+        file_path=file_path,
+        created_at=edge_created_at,
+        truncate="",
+        weight=weight,
+        predicate=predicate_resolved,
+        predicate_reason=predicate_reason,
+        original_src_id=original_src_id,
+        original_tgt_id=original_tgt_id,
+    )
+
+    # ---------------------------------------------------------------------
+    # 14) Relationship VDB (USING STORAGE IDS consistently)
+    #     Also remove predicate_valid/original/candidates from VDB payload.
+    # ---------------------------------------------------------------------
     if relationships_vdb is not None:
-        rel_vdb_id = compute_mdhash_id(src_id + tgt_id, prefix="rel-")
-        rel_vdb_id_reverse = compute_mdhash_id(tgt_id + src_id, prefix="rel-")
+        rel_vdb_id = compute_mdhash_id(src_id_store + tgt_id_store, prefix="rel-")
+        rel_vdb_id_reverse = compute_mdhash_id(tgt_id_store + src_id_store, prefix="rel-")
         try:
             await relationships_vdb.delete([rel_vdb_id, rel_vdb_id_reverse])
         except Exception as e:
             logger.debug(
                 f"Could not delete old relationship vector records {rel_vdb_id}, {rel_vdb_id_reverse}: {e}"
             )
-        rel_content = f"{keywords}\t{src_id}\n{tgt_id}\n{description}"
+
+        rel_content = f"{keywords}\t{src_id_store}\n{tgt_id_store}\n{description}"
         vdb_data = {
             rel_vdb_id: {
-                "src_id": src_id,
-                "tgt_id": tgt_id,
+                "src_id": src_id_store,
+                "tgt_id": tgt_id_store,
                 "source_id": source_id,
                 "content": rel_content,
                 "keywords": keywords,
                 "description": description,
                 "weight": weight,
+                "predicate": predicate_resolved,
+                "predicate_reason": predicate_reason,
                 "file_path": file_path,
+                "original_src_id": original_src_id,
+                "original_tgt_id": original_tgt_id,
+                "edge_key_swapped_for_storage": swapped_for_storage,
             }
         }
         await safe_vdb_operation_with_exception(
             operation=lambda payload=vdb_data: relationships_vdb.upsert(payload),
             operation_name="relationship_upsert",
-            entity_name=f"{src_id}-{tgt_id}",
+            entity_name=f"{src_id_store}-{tgt_id_store}",
             max_retries=3,
             retry_delay=0.2,
         )
 
     return edge_data
+
+
 
 
 async def merge_nodes_and_edges(
@@ -2456,8 +2537,7 @@ async def merge_nodes_and_edges(
 
         # Collect edges with sorted keys for undirected graph
         for edge_key, edges in maybe_edges.items():
-            sorted_edge_key = tuple(sorted(edge_key))
-            all_edges[sorted_edge_key].extend(edges)
+            all_edges[tuple(edge_key)].extend(edges)
 
     total_entities_count = len(all_nodes)
     total_relations_count = len(all_edges)
@@ -2788,15 +2868,41 @@ async def extract_entities(
     # add language and example number params to prompt
     language = global_config["addon_params"].get("language", DEFAULT_SUMMARY_LANGUAGE)
     entity_types = global_config["addon_params"].get(
-        "entity_types", DEFAULT_ENTITY_TYPES
+        "entity_types", DEFAULT_ENTITY_TYPES 
+        #maybe add to ontology with correct naming 
     )
 
     examples = "\n".join(PROMPTS["entity_extraction_examples"])
+
+    # Build a human-readable list of ontology edge types with allowed src->tgt
+    ontology = global_config.get("addon_params", {}).get("ontology") or {}
+    allowed_rel = ontology.get("allowed_relations") or {}
+    rel_preds = global_config.get("addon_params", {}).get("relation_predicates", [])
+
+    edge_lines: list[str] = []
+    if isinstance(allowed_rel, dict) and allowed_rel:
+        for pred, rule in allowed_rel.items():
+            try:
+                srcs = rule.get("src_types") or rule.get("source_types") or []
+                tgts = rule.get("tgt_types") or rule.get("target_types") or []
+                srcs_s = ", ".join(srcs) if isinstance(srcs, list) else str(srcs)
+                tgts_s = ", ".join(tgts) if isinstance(tgts, list) else str(tgts)
+                edge_lines.append(f"{pred}: {srcs_s} -> {tgts_s}")
+            except Exception:
+                # best-effort formatting
+                edge_lines.append(str(pred))
+    elif rel_preds:
+        for p in rel_preds:
+            edge_lines.append(f"{p}: (no src/tgt info)")
+
+    ontology_edge_list = "\n".join(edge_lines) if edge_lines else "(none)"
 
     example_context_base = dict(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         entity_types=", ".join(entity_types),
+        relation_predicates=", ".join(rel_preds),
+        ontology_edge_list=ontology_edge_list,
         language=language,
     )
     # add example's format
@@ -2806,6 +2912,8 @@ async def extract_entities(
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         entity_types=",".join(entity_types),
+        relation_predicates=",".join(rel_preds),
+        ontology_edge_list=ontology_edge_list,
         examples=examples,
         language=language,
     )
@@ -2846,7 +2954,7 @@ async def extract_entities(
             entity_extraction_user_prompt,
             use_llm_func,
             system_prompt=entity_extraction_system_prompt,
-            llm_response_cache=llm_response_cache,
+            llm_response_cache=None,
             cache_type="extract",
             chunk_id=chunk_key,
             cache_keys_collector=cache_keys_collector,
@@ -2872,7 +2980,7 @@ async def extract_entities(
                 entity_continue_extraction_user_prompt,
                 use_llm_func,
                 system_prompt=entity_extraction_system_prompt,
-                llm_response_cache=llm_response_cache,
+                llm_response_cache=None,
                 history_messages=history,
                 cache_type="extract",
                 chunk_id=chunk_key,

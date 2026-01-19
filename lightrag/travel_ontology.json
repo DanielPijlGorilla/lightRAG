@@ -1,0 +1,164 @@
+{
+  "ontology": {
+    "name": "TravelAgency-LightGraph",
+    "version": "1.0.0",
+    "nodeTypes": [
+      "Place",
+      "AdministrativeArea",
+      "Attraction",
+      "NaturalFeature",
+      "Organization",
+      "Accommodation",
+      "Activity",
+      "Transport",
+      "TourPackage",
+      "Service",
+      "Policy",
+      "Feature",
+      "Price",
+      "Date",
+      "Customer",
+      "Booking",
+      "Review",
+      "Person",
+      "Cuisine",
+      "CulturalConcept",
+      "Species",
+      "Award",
+      "Designation",
+      "Event",
+      "Product",
+      "Other"
+    ]
+  },
+   "edgeTypes": [
+    {
+      "name": "LOCATED_IN",
+      "from": ["Place", "Attraction", "NaturalFeature", "Organization", "Accommodation", "Activity", "Transport"],
+      "to": ["Place", "AdministrativeArea"],
+      "inverse": "CONTAINS",
+      "constraints": {
+        "fromToCardinality": "0..1",
+        "toFromCardinality": "0..*",
+        "required": false,
+        "notes": "General location containment. Use for: X is located in Y."
+      }
+    },
+    {
+      "name": "PART_OF",
+      "from": ["Place", "AdministrativeArea", "NaturalFeature"],
+      "to": ["Place", "AdministrativeArea"],
+      "inverse": "HAS_PART",
+      "constraints": {
+        "fromToCardinality": "0..*",
+        "toFromCardinality": "0..*",
+        "required": false,
+        "notes": "Use for hierarchical regions: city part of prefecture, basin part of region."
+      }
+    },
+    {
+      "name": "HAS_ATTRACTION",
+      "from": ["Place", "AdministrativeArea"],
+      "to": ["Attraction"],
+      "inverse": "ATTRACTION_IN",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_NATURAL_FEATURE",
+      "from": ["Place", "AdministrativeArea"],
+      "to": ["NaturalFeature"],
+      "inverse": "NATURAL_FEATURE_IN",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "OFFERS_SERVICE",
+      "from": ["Organization", "Accommodation", "Activity", "TourPackage"],
+      "to": ["Service"],
+      "inverse": "SERVICE_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_POLICY",
+      "from": ["Organization", "Accommodation", "TourPackage", "Booking"],
+      "to": ["Policy"],
+      "inverse": "POLICY_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_FEATURE",
+      "from": ["Place", "Attraction", "Organization", "Accommodation", "Activity", "TourPackage", "NaturalFeature"],
+      "to": ["Feature"],
+      "inverse": "FEATURE_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_DESIGNATION",
+      "from": ["Place", "Attraction", "Organization"],
+      "to": ["Designation"],
+      "inverse": "DESIGNATION_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_AWARD",
+      "from": ["Place", "Attraction", "Organization", "Person"],
+      "to": ["Award"],
+      "inverse": "AWARD_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_SPECIES",
+      "from": ["Place", "AdministrativeArea", "NaturalFeature"],
+      "to": ["Species"],
+      "inverse": "SPECIES_IN",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "HAS_CUISINE",
+      "from": ["Place", "Organization", "Accommodation", "Attraction"],
+      "to": ["Cuisine"],
+      "inverse": "CUISINE_OF",
+      "constraints": { "fromToCardinality": "0..*", "toFromCardinality": "0..*", "required": false }
+    },
+    {
+      "name": "RELATED_TO",
+      "from": [
+        "Place","AdministrativeArea","Attraction","NaturalFeature","Organization",
+        "Accommodation","Activity","Transport","TourPackage","Service","Policy",
+        "Feature","Price","Date","Customer","Booking","Review","Person","Cuisine",
+        "CulturalConcept","Species","Award","Designation","Event","Product","Other"
+      ],
+      "to": [
+        "Place","AdministrativeArea","Attraction","NaturalFeature","Organization",
+        "Accommodation","Activity","Transport","TourPackage","Service","Policy",
+        "Feature","Price","Date","Customer","Booking","Review","Person","Cuisine",
+        "CulturalConcept","Species","Award","Designation","Event","Product","Other"
+      ],
+      "inverse": "RELATED_TO",
+      "constraints": {
+        "fromToCardinality": "0..*",
+        "toFromCardinality": "0..*",
+        "required": false,
+        "notes": "Fallback relation when a specific predicate is unknown."
+      }
+    }
+  ],
+  "globalConstraints": [
+    {
+      "name": "ReviewMustTargetSomething",
+      "rule": "Each Review should have at least one of: REVIEWS_BOOKING or REVIEWS_PACKAGE (if reviews are present in the dataset).",
+      "type": "soft_edge_presence",
+      "appliesToNodeType": "Review"
+    },
+    {
+      "name": "TransportOriginDestinationDifferent",
+      "rule": "For any Transport node: ORIGIN and DESTINATION should not point to the same Place.",
+      "type": "soft_edge_consistency",
+      "appliesToNodeType": "Transport"
+    }
+  ],
+  "designNotes": [
+    "This ontology is optimized for text-extracted travel guides (places, regions, nature, orgs, awards).",
+    "Global constraints are intentionally soft to avoid rejecting incomplete info from documents.",
+    "Use RELATED_TO as a safe fallback instead of rejecting predicates."
+  ]
+}

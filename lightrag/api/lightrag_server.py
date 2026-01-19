@@ -64,6 +64,9 @@ from lightrag.kg.shared_storage import (
 from fastapi.security import OAuth2PasswordRequestForm
 from lightrag.api.auth import auth_handler
 
+import json
+from lightrag.api.ontology.ontology import compile_ontology
+
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
@@ -1041,6 +1044,21 @@ def create_app(args):
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
 
+    
+    ONTOLOGY_PATH = Path(__file__).resolve().parent.parent / "travel_ontology.json"
+    # ^ pas dit aan op jouw structuur
+
+    with ONTOLOGY_PATH.open("r", encoding="utf-8") as f:
+        raw_ontology = json.load(f)
+
+    compiled_ontology = compile_ontology(raw_ontology)
+
+    logger.info(
+        f"Loaded ontology '{compiled_ontology.get('name')}' "
+        f"v{compiled_ontology.get('version')} "
+        f"with {len(compiled_ontology.get('relation_predicates', []))} relations"
+    )
+
     # Initialize RAG with unified configuration
     try:
         rag = LightRAG(
@@ -1074,6 +1092,7 @@ def create_app(args):
             addon_params={
                 "language": args.summary_language,
                 "entity_types": args.entity_types,
+                "ontology": compiled_ontology,
             },
             ollama_server_infos=ollama_server_infos,
         )

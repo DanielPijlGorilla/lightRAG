@@ -1903,7 +1903,7 @@ def remove_think_tags(text: str) -> str:
 async def use_llm_func_with_cache(
     user_prompt: str,
     use_llm_func: callable,
-    llm_response_cache: "BaseKVStorage | None" = None,
+    llm_response_cache: None,
     system_prompt: str | None = None,
     max_tokens: int = None,
     history_messages: list[dict[str, str]] = None,

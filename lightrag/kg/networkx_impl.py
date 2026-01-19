@@ -6,6 +6,7 @@ from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdg
 from lightrag.utils import logger
 from lightrag.base import BaseGraphStorage
 import networkx as nx
+import json
 from .shared_storage import (
     get_namespace_lock,
     get_update_flag,
@@ -34,6 +35,65 @@ class NetworkXStorage(BaseGraphStorage):
         logger.info(
             f"[{workspace}] Writing graph with {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
         )
+
+        try:
+            # ---- Normalize node attrs (especially entity_type) ----
+            for node_id, attrs in graph.nodes(data=True):
+                # Coerce non-GraphML-serializable types to strings
+                for k, v in list(attrs.items()):
+                    if v is None:
+                        attrs[k] = ""
+                    elif isinstance(v, bool):
+                        attrs[k] = "true" if v else "false"
+                    elif isinstance(v, (list, dict, tuple, set)):
+                        try:
+                            attrs[k] = json.dumps(
+                                list(v) if isinstance(v, set) else v, ensure_ascii=False
+                            )
+                        except Exception:
+                            attrs[k] = str(v)
+                    elif not isinstance(v, (str, int, float)):
+                        attrs[k] = str(v)
+
+            # ---- Normalize edge attrs ----
+            for u, v, attrs in graph.edges(data=True):
+                # If you want schema visibility: keep these two keys always present.
+                # BUT do NOT add predicate_valid / predicate_candidates.
+                if "predicate" not in attrs:
+                    attrs["predicate"] = ""
+                if "predicate_reason" not in attrs:
+                    attrs["predicate_reason"] = ""
+
+                # OPTIONAL: make predicate uppercase for consistency
+                if attrs.get("predicate"):
+                    attrs["predicate"] = str(attrs["predicate"]).strip().upper()
+
+                # Remove legacy / unwanted keys if they exist
+                for legacy_key in ("predicate_valid", "predicate_candidates", "predicate_original",
+                   "edge_key_canonicalized", "edge_key_swapped_for_storage",
+                   "original_src_id", "original_tgt_id"):
+                    if legacy_key in attrs:
+                        attrs.pop(legacy_key, None)
+
+                # Coerce non-GraphML-serializable types to strings
+                for k, v in list(attrs.items()):
+                    if v is None:
+                        attrs[k] = ""
+                    elif isinstance(v, bool):
+                        attrs[k] = "true" if v else "false"
+                    elif isinstance(v, (list, dict, tuple, set)):
+                        try:
+                            attrs[k] = json.dumps(
+                                list(v) if isinstance(v, set) else v, ensure_ascii=False
+                            )
+                        except Exception:
+                            attrs[k] = str(v)
+                    elif not isinstance(v, (str, int, float)):
+                        attrs[k] = str(v)
+
+        except Exception:
+            logger.debug(f"[{workspace}] Failed to normalize attrs before write", exc_info=True)
+
         nx.write_graphml(graph, file_name)
 
     def __post_init__(self):
@@ -131,11 +191,45 @@ class NetworkXStorage(BaseGraphStorage):
 
     async def upsert_node(self, node_id: str, node_data: dict[str, str]) -> None:
         """
-        Importance notes:
+        Notes:
         1. Changes will be persisted to disk during the next index_done_callback
-        2. Only one process should updating the storage at a time before index_done_callback,
-           KG-storage-log should be used to avoid data corruption
+        2. Only one process should update at a time before index_done_callback
+
+        Normalizes node_data["entity_type"] to the canonical casing from the loaded ontology
+        (e.g. "place"/"PLACE"/"Place" -> "Place").
         """
+
+        if node_data is not None and "entity_type" in node_data and node_data["entity_type"] is not None:
+            raw_type = str(node_data["entity_type"]).strip()
+            if raw_type:
+                # Build a case-insensitive map from ontology node types -> canonical casing
+                onto = None
+                addon = self.global_config.get("addon_params") if isinstance(self.global_config, dict) else None
+                if isinstance(addon, dict):
+                    onto = addon.get("ontology")
+                if onto is None and isinstance(self.global_config, dict):
+                    onto = self.global_config.get("ontology")
+
+                canonical_map: dict[str, str] = {}
+                if isinstance(onto, dict):
+                    raw_node_types = []
+                    if isinstance(onto.get("ontology"), dict):
+                        raw_node_types = onto["ontology"].get("nodeTypes") or []
+                    if not raw_node_types:
+                        raw_node_types = onto.get("node_types") or onto.get("nodeTypes") or []
+
+                    if isinstance(raw_node_types, list):
+                        for t in raw_node_types:
+                            if t is None:
+                                continue
+                            t_str = str(t).strip()
+                            if t_str:
+                                canonical_map[t_str.lower()] = t_str
+
+                canonical = canonical_map.get(raw_type.lower())
+                node_data = dict(node_data)  
+                node_data["entity_type"] = canonical if canonical else raw_type
+
         graph = await self._get_graph()
         graph.add_node(node_id, **node_data)
 
