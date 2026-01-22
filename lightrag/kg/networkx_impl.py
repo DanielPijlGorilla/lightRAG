@@ -55,16 +55,12 @@ class NetworkXStorage(BaseGraphStorage):
                     elif not isinstance(v, (str, int, float)):
                         attrs[k] = str(v)
 
-            # ---- Normalize edge attrs ----
             for u, v, attrs in graph.edges(data=True):
-                # If you want schema visibility: keep these two keys always present.
-                # BUT do NOT add predicate_valid / predicate_candidates.
                 if "predicate" not in attrs:
                     attrs["predicate"] = ""
                 if "predicate_reason" not in attrs:
                     attrs["predicate_reason"] = ""
-
-                # OPTIONAL: make predicate uppercase for consistency
+                    
                 if attrs.get("predicate"):
                     attrs["predicate"] = str(attrs["predicate"]).strip().upper()
 

@@ -1,0 +1,102 @@
+[
+  {
+    "question": "How does the town of Kamikatsu achieve its zero-waste status?",
+    "reference_answer": "Kamikatsu residents separate their waste into 45 different categories at the Zero Waste Center, achieving an 80% recycling rate. Initiatives include the 'Zero Waste Center' and local businesses like 'HOTEL WHY', emphasizing comprehensive waste treatment.",
+    "label": "kamikatsu_zero_waste"
+  },
+  {
+    "question": "What natural feature makes Lake Shikotsu distinct?",
+    "reference_answer": "Lake Shikotsu is a caldera lake recognized for having the clearest waters in Japan for over ten years, offering high transparency, emerald-green waters, and mirror-like reflections of the surrounding mountains.",
+    "label": "lake_shikotsu_clarity"
+  },
+  {
+    "question": "Why do red-crowned cranes in Kushiroshitsugen National Park stay throughout the year?",
+    "reference_answer": "The cranes nest and breed in the marshlands, meaning they do not migrate and can be seen year-round. This recovery is supported by dedicated conservation efforts in the park's rich wetland habitats.",
+    "label": "kushiro_cranes_migration"
+  },
+  {
+    "question": "What sustainable energy source does the Treeful Treehouse resort use?",
+    "reference_answer": "The resort generates electricity on-site using carbon-neutral solar arrays instead of fossil fuels.",
+    "label": "treeful_treehouse_energy"
+  },
+  {
+    "question": "What is Chagusaba and where is it practiced?",
+    "reference_answer": "Chagusaba is a sustainable agricultural method for green tea production practiced in Shizuoka Prefecture, notably in areas like Kakegawa. It involves using cut grass as organic fertilizer to protect tea fields and preserve biodiversity.",
+    "label": "shizuoka_chagusaba"
+  },
+  {
+    "question": "What role does the Picchio Wildlife Research Center play in Karuizawa?",
+    "reference_answer": "Picchio conducts education programs, habitat management projects, and eco-tours to protect Asiatic black bears and ensure human safety. It received the Japan Tourism Award for Responsible Tourism in collaboration with UNWTO for its conservation efforts.",
+    "label": "picchio_bear_protection"
+  },
+  {
+    "question": "How does the Zaborin ryokan in Hokkaido heat its building sustainably?",
+    "reference_answer": "Zaborin utilizes an on-site natural hot spring to provide carbon-neutral underfloor heating during the winter and uses cold spring water for cooling in the summer.",
+    "label": "zaborin_heating"
+  },
+  {
+    "question": "What is the significance of the Kumano Kodo Pilgrimage Routes?",
+    "reference_answer": "They are UNESCO World Heritage trails in Wakayama (Yoshino-Kumano National Park) used by pilgrims for over 1,000 years to revere nature, featuring sites like Kumano Nachi Taisha and offering guided sustainable trekking experiences.",
+    "label": "kumano_kodo_significance"
+  },
+  {
+    "question": "What kind of cuisine is served at Koyasan temple lodgings?",
+    "reference_answer": "Guests are served shojin ryori, a traditional Buddhist cuisine made entirely of vegetables, grains, edible wild plants, and soybeans, prepared by monks.",
+    "label": "koyasan_shojin_ryori"
+  },
+  {
+    "question": "What activity have the Ama female divers of Ise-Shima practiced for 3,000 years?",
+    "reference_answer": "The Ama have practiced sustainable breath-hold free diving for over 3,000 years to catch shellfish like abalone and sea snails in the region's pristine waters.",
+    "label": "ise_shima_ama_divers"
+  },
+  {
+    "question": "What are the key features of the Good Nature Hotel in Kyoto that contribute to its sustainability and wellness focus?",
+    "reference_answer": "The Good Nature Hotel in Kyoto is a 'lifestyle hotel' with Gold WELL Certification. It features wellness activities (yoga, meditation), serves seasonal/local food (e.g., vegetable-focused Erutan restaurant), reduces plastic waste, and promotes local production for guest well-being and environmental responsibility.",
+    "label": "good_nature_hotel_features"
+  },
+  {
+    "question": "How does the town of Biei in Hokkaido promote sustainable tourism?",
+    "reference_answer": "Biei promotes sustainable tourism through guided cycle tours using emissions-free electric bikes to explore its rolling hills and flowers. It was selected for the UNWTO 'Best Tourism Villages' upgrade program in 2021.",
+    "label": "biei_sustainable_tourism"
+  },
+  {
+    "question": "Describe the traditional practice of 'Ama' divers in Ise-Shima.",
+    "reference_answer": "Ama act as sustainable breath-hold free divers catching shellfish like abalone and sea snails. The practice has existed for over 3,000 years, characterized by a deep respect for ocean deities and gathering in 'Ama huts' (like Ama Hut HACHIMAN) to warm up and share their catch.",
+    "label": "ama_divers_practice"
+  },
+  {
+    "question": "What makes the Shirakami Sanchi beech forest significant and how is it protected?",
+    "reference_answer": "The Shirakami Sanchi beech forest is an ancient, virtually untouched ecosystem (8,000+ years old) and Japan's first World Heritage Site. It hosts rare species like black woodpeckers. Protection involves restricted entry, required climbing permission, and visitor education on hiking etiquette.",
+    "label": "shirakami_sanchi_significance"
+  },
+  {
+    "question": "What acts performed by the Yamabushi priests in Dewa Sanzan are accessible to visitors?",
+    "reference_answer": "Visitors can join Yamabushi priests (guided by masters like Master Hoshino) to walk sacred trails, stay in traditional pilgrim lodges, and learn meditation and other techniques to reconnect with nature, supported by organizations like Megurun.",
+    "label": "yamabushi_visitor_access"
+  },
+  {
+    "question": "Compare the sustainability practices of Bettei Senjuan Hotel and Zaborin Ryokan regarding heating and energy.",
+    "reference_answer": "Zaborin uses on-site hot springs for carbon-neutral underfloor heating (winter) and cold springs for cooling (summer). Bettei Senjuan features private open-air baths fed by natural hot springs and holds Green Key certification, though its use of onsen water specifically for space heating is not explicitly detailed.",
+    "label": "compare_ryokan_sustainability"
+  },
+  {
+    "question": "What unique 'zero-waste' experience does HOTEL WHY offer to its guests?",
+    "reference_answer": "HOTEL WHY offers an interactive experience housed in a question-mark-shaped building where guests learn about Kamikatsu's zero-waste history and participate in separating waste into 45 categories at the adjacent Zero Waste Center.",
+    "label": "hotel_why_zero_waste"
+  },
+  {
+    "question": "What is the significance of the Takachiho-no-Yokagura ritual and when is it performed?",
+    "reference_answer": "Takachiho-no-Yokagura is an 800-year-old Shinto ritual at Takachiho Shrine reenacting Japanese mythology. It is performed between November and February to thank local gods for the autumn harvest and pray for blessings like good harvests and marriage.",
+    "label": "takachiho_kagura_ritual"
+  },
+  {
+    "question": "How does the Gion Matsuri festival in Kyoto address waste management?",
+    "reference_answer": "Since 2014, the Gion Matsuri has operated a zero-waste campaign (serving ~210,000 meals) where street stalls are committed to transitioning from disposable to reusable tableware.",
+    "label": "gion_matsuri_zero_waste"
+  },
+  {
+    "question": "What unique cultural experience does the Kaikaro teahouse in Kanazawa offer?",
+    "reference_answer": "Kaikaro, a 200-year-old teahouse in the Higashi Chaya District, offers experiences of geisha (geigi) culture including traditional dances, songs, and English explanations of traditions from the proprietress, accompanied by tea and regional dishes.",
+    "label": "kanazawa_geisha_experience"
+  }
+]
